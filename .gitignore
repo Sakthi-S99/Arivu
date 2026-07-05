@@ -1,0 +1,33 @@
+# ── Python ────────────────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# ── Environment / secrets ─────────────────────────────────
+.env
+*.env
+
+# ── Runtime state & logs ──────────────────────────────────
+.ingest_state.json
+*.log
+
+# ── Local domain config — keeps your vocabulary out of the public repo ────
+config/acronyms.local.json
+
+# ── Knowledge base — NEVER commit source documents ────────
+# PDFs, notes, and personal data stay local only
+ai-knowledge-base/
+*.pdf
+data/
+documents/
+
+# ── Qdrant local storage (if mounted in-repo) ─────────────
+qdrant_storage/
+
+# ── IDE / OS ──────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
