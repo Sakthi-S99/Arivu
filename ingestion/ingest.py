@@ -14,6 +14,7 @@ import glob
 import json
 import time
 import uuid
+import fcntl
 import hashlib
 import logging
 import argparse
@@ -46,6 +47,28 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ingest_s
 
 # Fixed namespace for deterministic chunk IDs — NEVER change this value
 ARIVU_NS = uuid.UUID("00000000-0000-0000-0000-00000000a71b")
+
+# Guards against two ingest/clean-orphans runs racing on the same collection
+# and state file — reproduced live on 2026-07-06 when a manually-started run
+# and an agent-spawned run both called --reset within seconds of each other.
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ingest.lock")
+_lock_fd = None
+
+
+def _acquire_lock():
+    """
+    Exclusive, non-blocking flock — held for the process lifetime and
+    released automatically by the OS on exit or crash, so there's no stale
+    lock file to clean up by hand.
+    """
+    global _lock_fd
+    _lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log.error("Another ingest/clean-orphans run is already in progress "
+                   "(lock held on %s). Exiting.", LOCK_FILE)
+        sys.exit(1)
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import (
@@ -86,7 +109,7 @@ def extract_text(path: str) -> tuple[str, dict]:
     return "", meta
 
 
-# ── Chunking (fixed-size with overlap, word-based approximation) ───────────────
+# ── Chunking (line-aware, with hard chapter breaks) ─────────────────────────────
 def _split_long_words(words: list[str]) -> list[str]:
     """
     Split any single 'word' longer than MAX_WORD_CHARS.
@@ -103,42 +126,104 @@ def _split_long_words(words: list[str]) -> list[str]:
     return out
 
 
+def _pack_to_char_ceiling(words: list[str]) -> list[str]:
+    """
+    Pack words into one or more strings, each under MAX_CHUNK_CHARS.
+    Drains `words` completely — unlike a plain trim-and-discard, no content
+    is lost when a chunk would otherwise exceed the char ceiling.
+    """
+    out = []
+    while words:
+        trimmed, length = [], 0
+        for w in words:
+            if length + len(w) + 1 > MAX_CHUNK_CHARS:
+                break
+            trimmed.append(w)
+            length += len(w) + 1
+        if not trimmed:
+            # A single word alone exceeds the ceiling — shouldn't happen
+            # post _split_long_words, but take it whole rather than loop forever.
+            trimmed = words[:1]
+        out.append(" ".join(trimmed))
+        words = words[len(trimmed):]
+    return out
+
+
+# pypdf extraction of these Guidewire PDFs has no blank-line paragraph breaks
+# (every wrapped line is just "\n"-joined), but chapter headings are a literal,
+# unambiguous "chapter N" line — a real, observed structural signal worth
+# anchoring on, unlike guessed heading heuristics.
+_CHAPTER_BOUNDARY = re.compile(r"^\s*chapter\s+\d+\b", re.IGNORECASE)
+
+
+def _lines(text: str) -> list[str]:
+    """Non-empty lines, with any oversized 'word' pre-split within each line."""
+    out = []
+    for line in text.split("\n"):
+        line = line.strip()
+        words = _split_long_words(line.split())
+        if words:
+            out.append(" ".join(words))
+    return out
+
+
 def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
     """
-    Fixed-size chunking with overlap.
-    Word-based (~1.3 words/token) with two hard safety caps:
-      - MAX_WORD_CHARS: split monster tokens from bad extraction
-      - MAX_CHUNK_CHARS: cap chunk char length so token count stays under model limit
+    Line-aware chunking with hard chapter breaks.
+    The old fixed-size chunker flattened the whole document into one word
+    stream (`text.split()`), so a chunk boundary could fall anywhere — including
+    gluing the last words of one chapter to the first words of an unrelated one,
+    or splitting a bullet/procedure line in half. This packs whole *lines* into
+    ~`size`-word chunks instead, and always starts a fresh chunk at a "chapter N"
+    line, so a chunk never mixes two chapters and a wrapped line/bullet is never
+    split mid-line.
     """
-    words = _split_long_words(text.split())
-    if not words:
+    lines = _lines(text)
+    if not lines:
         return []
 
-    chunks, start = [], 0
-    step = size - overlap
-    while start < len(words):
-        window = words[start:start + size]
-        chunk = " ".join(window)
+    chunks: list[str] = []
+    current: list[str] = []
+    current_words = 0
 
-        # Character ceiling — trim to whole words under MAX_CHUNK_CHARS
-        if len(chunk) > MAX_CHUNK_CHARS:
-            trimmed, length = [], 0
-            for w in window:
-                if length + len(w) + 1 > MAX_CHUNK_CHARS:
-                    break
-                trimmed.append(w)
-                length += len(w) + 1
-            chunk = " ".join(trimmed)
-            # Advance only past what we actually consumed (keep overlap semantics)
-            consumed = max(len(trimmed) - overlap, 1)
-            if chunk.strip():
-                chunks.append(chunk)
-            start += consumed
+    def flush():
+        if current:
+            chunks.extend(_pack_to_char_ceiling(" ".join(current).split()))
+
+    for line in lines:
+        line_words = line.split()
+
+        if _CHAPTER_BOUNDARY.match(line) and current:
+            flush()
+            current, current_words = [], 0
+
+        # Oversized single line (rare pathological extraction): flush what we
+        # have, then window-split this one line on its own.
+        if len(line_words) > size:
+            flush()
+            current, current_words = [], 0
+            start, step = 0, size - overlap
+            while start < len(line_words):
+                chunks.extend(_pack_to_char_ceiling(line_words[start:start + size]))
+                start += step
             continue
 
-        if chunk.strip():
-            chunks.append(chunk)
-        start += step
+        if current_words + len(line_words) > size:
+            flush()
+            # Carry trailing lines forward for overlap continuity.
+            carry, carry_words = [], 0
+            for prev_line in reversed(current):
+                pw = len(prev_line.split())
+                if carry_words + pw > overlap:
+                    break
+                carry.insert(0, prev_line)
+                carry_words += pw
+            current, current_words = carry, carry_words
+
+        current.append(line)
+        current_words += len(line_words)
+
+    flush()
     return chunks
 
 
@@ -275,6 +360,7 @@ def clean_orphans():
     Remove points whose source file no longer exists on disk.
     Handles moved/renamed/deleted files without a full --reset.
     """
+    _acquire_lock()
     docs_root = os.path.expanduser(DOCS_DIR)
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
@@ -358,7 +444,8 @@ def get_client(reset: bool = False) -> QdrantClient:
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
-def ingest(reset: bool = False):
+def ingest(reset: bool = False, only: str | None = None):
+    _acquire_lock()
     docs_root = os.path.expanduser(DOCS_DIR)
     if not os.path.isdir(docs_root):
         log.error("Docs dir not found: %s", docs_root)
@@ -378,8 +465,12 @@ def ingest(reset: bool = False):
     for p in patterns:
         files.extend(glob.glob(os.path.join(docs_root, p), recursive=True))
 
+    if only:
+        files = [f for f in files if only in os.path.basename(f)]
+
     if not files:
-        log.warning("No documents found under %s", docs_root)
+        log.warning("No documents found under %s%s", docs_root,
+                     f" matching --only {only!r}" if only else "")
         return
 
     # Compare content hash, not just path — catches edits to already-ingested files
@@ -515,9 +606,12 @@ if __name__ == "__main__":
     parser.add_argument("--reset", action="store_true", help="Drop and rebuild collection")
     parser.add_argument("--clean-orphans", action="store_true",
                         help="Remove chunks whose source file no longer exists")
+    parser.add_argument("--only", metavar="FILENAME",
+                        help="Restrict this run to files whose basename contains FILENAME "
+                             "(batched re-ingest: run once per file/group)")
     args = parser.parse_args()
 
     if args.clean_orphans:
         clean_orphans()
     else:
-        ingest(reset=args.reset)
+        ingest(reset=args.reset, only=args.only)

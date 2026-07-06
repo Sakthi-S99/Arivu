@@ -12,6 +12,7 @@ __pycache__/
 
 # ── Runtime state & logs ──────────────────────────────────
 .ingest_state.json
+.ingest.lock
 *.log
 
 # ── Local domain config — keeps your vocabulary out of the public repo ────
@@ -31,3 +32,6 @@ qdrant_storage/
 .vscode/
 .idea/
 .DS_Store
+
+# ── Local project docs (deployment specifics, not for public repo) ────────
+docs/

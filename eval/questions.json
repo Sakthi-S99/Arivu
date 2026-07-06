@@ -1,14 +1,29 @@
 {
   "positive": [
     {
-      "question": "What are the supported configuration options for this feature?",
-      "must_include": [],
-      "note": "Replace with a question and keywords answerable from YOUR ingested docs"
+      "question": "What is a delinquency plan in BillingCenter?",
+      "must_include": ["delinquency workflows"],
+      "note": "Verified this session: real answer is 'A delinquency plan is a set of values and delinquency workflows that define how delinquencies are processed for the associated accounts and policies.'"
     },
     {
-      "question": "How does the approval workflow work end-to-end?",
-      "must_include": [],
-      "note": "Add 1-3 key terms that MUST appear if answer is grounded"
+      "question": "How can a delinquency be started in BillingCenter?",
+      "must_include": ["BCAPI"],
+      "note": "Source text: delinquencies can be started automatically via the BCAPI web service, manually via the Start Delinquency button, or via the Invoice Due batch process."
+    },
+    {
+      "question": "What is a commission plan used for in BillingCenter?",
+      "must_include": ["producers"],
+      "note": "Source text (chapter 'Commission plans'): BillingCenter uses commission plans to calculate the amount of commission owed to producers for a policy."
+    },
+    {
+      "question": "What is a producer in BillingCenter?",
+      "must_include": ["insurers"],
+      "note": "Source text: 'A producer is a business entity that connects insurers and potential policyholders.'"
+    },
+    {
+      "question": "What is a payment allocation plan in BillingCenter?",
+      "must_include": ["unapplied fund"],
+      "note": "Source text: 'A payment allocation plan identifies how to distribute money in an unapplied fund to unpaid invoice items.'"
     }
   ],
   "negative": [
@@ -19,6 +34,10 @@
     {
       "question": "How do I configure a nuclear reactor control rod system?",
       "note": "Plausible-sounding but out of scope — must refuse if not present"
+    },
+    {
+      "question": "How do I configure a new business workflow in PolicyCenter?",
+      "note": "Domain-realistic bait: PolicyCenter is a real Guidewire product (and 'PC' is a defined acronym in config/acronyms.local.json), but this deployment's corpus only has BillingCenter/Integration/GOSU/Contact Management/ContentCookbook docs — no PolicyCenter documentation is actually ingested, so this must still be refused despite sounding on-domain."
     }
   ]
 }

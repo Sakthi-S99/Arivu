@@ -50,7 +50,7 @@ An answer is NOT faithful if it introduces any typecode, name, number, or claim 
         f"{OLLAMA_HOST}/api/generate",
         json={"model": EVAL_JUDGE_MODEL, "prompt": prompt, "stream": False,
               "format": "json", "options": {"temperature": 0}},
-        timeout=300,
+        timeout=1200,
     )
     resp.raise_for_status()
     try:

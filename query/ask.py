@@ -5,6 +5,7 @@ Embed question -> Search Qdrant -> Build context -> LLM answer.
 Usage:
     python ask.py "How do I configure the retry policy for background jobs?"
     python ask.py                    # interactive mode
+    python ask.py --debug "term"     # dump raw candidate scores at each stage
 """
 
 import os
@@ -18,7 +19,7 @@ from qdrant_client import models as qmodels
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import (
-    OLLAMA_HOST, EMBED_MODEL, LLM_MODEL,
+    OLLAMA_HOST, EMBED_MODEL, LLM_MODEL, LLM_NUM_CTX,
     QDRANT_HOST, QDRANT_PORT, COLLECTION, TOP_K, SCORE_THRESHOLD,
     RETRIEVE_N, ENABLE_QUERY_EXPANSION, ENABLE_RERANK,
     RERANK_SCORE_THRESHOLD, ENABLE_HYBRID, SPARSE_MODEL,
@@ -46,17 +47,33 @@ def _get_sparse_model():
 
 
 def embed(text: str) -> list[float]:
-    """Embed a single query via Ollama /api/embed. Must match ingest model."""
+    """
+    Embed a single query via Ollama /api/embed. Must match ingest model.
+    keep_alive=0 evicts bge-m3 the instant this returns — on this iGPU's
+    small shared Vulkan memory budget, a resident embed model steals GPU
+    headroom from the generation model and forces it into a slower
+    CPU/GPU split (see the generation-latency investigation).
+    """
     resp = requests.post(
         f"{OLLAMA_HOST}/api/embed",
-        json={"model": EMBED_MODEL, "input": text},
+        json={"model": EMBED_MODEL, "input": text, "keep_alive": 0},
         timeout=120,
     )
     resp.raise_for_status()
     return resp.json()["embeddings"][0]
 
 
-def retrieve(question: str, client: QdrantClient):
+def _dump_candidates(label: str, items) -> None:
+    """Debug dump: rank, score, source, and a text snippet for each candidate."""
+    print(f"\n--- DEBUG: {label} ({len(items)} candidates) ---")
+    for i, (point, score) in enumerate(items, 1):
+        src = point.payload.get("source", "unknown")
+        snippet = point.payload.get("text", "").replace("\n", " ")[:100]
+        print(f"  {i:>2}. score={score:.4f}  [{src}]  {snippet}...")
+    print("--- end DEBUG ---\n")
+
+
+def retrieve(question: str, client: QdrantClient, debug: bool = False):
     """
     Pipeline: [expand] -> embed -> retrieve wide (hybrid|dense) -> [rerank] -> top-K.
     """
@@ -100,12 +117,18 @@ def retrieve(question: str, client: QdrantClient):
         )
     hits = result.points
     log.info("SEARCH done — %d candidates in %.2fs", len(hits), time.time() - t0)
+    if debug:
+        _dump_candidates("search stage (pre-rerank/threshold)",
+                          [(h, h.score) for h in hits])
 
     # 4. Rerank (cross-encoder) OR cosine threshold
     if ENABLE_RERANK and hits:
         from query.reranker import rerank
         t0 = time.time()
-        ranked = rerank(q, hits, TOP_K)                       # list of (point, score)
+        all_ranked = rerank(q, hits)                          # full ranked list
+        if debug:
+            _dump_candidates("rerank stage (all candidates)", all_ranked)
+        ranked = all_ranked[:TOP_K]
         if RERANK_SCORE_THRESHOLD is not None:
             ranked = [(p, s) for p, s in ranked if s >= RERANK_SCORE_THRESHOLD]
         log.info("RERANK done — kept %d in %.2fs (top score %.3f)",
@@ -147,7 +170,35 @@ def build_context(hits) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+_QUESTION_STARTERS = {
+    "what", "how", "why", "when", "where", "who", "which", "whom", "whose",
+    "is", "are", "was", "were", "do", "does", "did", "can", "could", "would",
+    "should", "will", "shall", "explain", "describe", "list", "summarize",
+}
+
+
+def _normalize_question(question: str) -> str:
+    """
+    Bare keywords/topic phrases ("Delinquency", "delinquency workflow
+    configuration steps overview") aren't questions regardless of length —
+    the strict prompt below has nothing to "answer" for them, so the model
+    falls back to the not-found response even when the context is directly
+    on topic. A word-count cutoff doesn't generalize (a 5-word topic phrase
+    fails the same way a 1-word one does), so key off phrasing instead:
+    rewrite anything that isn't already a question (no '?', doesn't open
+    with a question/imperative word) into an explicit question it can act on.
+    """
+    stripped = question.strip()
+    if not stripped or "?" in stripped:
+        return question
+    first_word = stripped.split()[0].lower()
+    if first_word not in _QUESTION_STARTERS:
+        return f'What does the documentation say about "{stripped}"?'
+    return question
+
+
 def ask_llm(question: str, context: str) -> str:
+    question = _normalize_question(question)
     prompt = f"""You are answering strictly from the provided context.
 
 Rules:
@@ -155,6 +206,7 @@ Rules:
 - Do NOT invent identifiers, class names, method names, or configuration values.
 - If the context does not contain the answer, respond exactly: "The provided documents do not contain this information."
 - Quote exact identifiers/values only if they appear verbatim in the context.
+- Be concise: answer in as few sentences as fully answering the question requires.
 
 Context:
 {context}
@@ -167,8 +219,11 @@ Answer:"""
     t0 = time.time()
     resp = requests.post(
         f"{OLLAMA_HOST}/api/generate",
-        json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
-        timeout=300,
+        json={
+            "model": LLM_MODEL, "prompt": prompt, "stream": False,
+            "options": {"num_ctx": LLM_NUM_CTX, "num_predict": 500},
+        },
+        timeout=1200,
     )
     resp.raise_for_status()
     out = resp.json()["response"].strip()
@@ -176,8 +231,8 @@ Answer:"""
     return out
 
 
-def answer(question: str, client: QdrantClient):
-    hits = retrieve(question, client)
+def answer(question: str, client: QdrantClient, debug: bool = False):
+    hits = retrieve(question, client, debug=debug)
     if not hits:
         print(f"No chunks above score {SCORE_THRESHOLD}. Either the KB lacks this topic, or lower SCORE_THRESHOLD.")
         return
@@ -200,15 +255,19 @@ def answer(question: str, client: QdrantClient):
 if __name__ == "__main__":
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
-    if len(sys.argv) > 1:
-        answer(" ".join(sys.argv[1:]), client)
+    args = sys.argv[1:]
+    debug = "--debug" in args
+    args = [a for a in args if a != "--debug"]
+
+    if args:
+        answer(" ".join(args), client, debug=debug)
     else:
         print("Arivu RAG — interactive mode. Ctrl+C to exit.\n")
         try:
             while True:
                 q = input("Q: ").strip()
                 if q:
-                    answer(q, client)
+                    answer(q, client, debug=debug)
                     print()
         except KeyboardInterrupt:
             print("\nBye.")

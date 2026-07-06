@@ -3,7 +3,9 @@
 # Ollama
 OLLAMA_HOST = "http://localhost:11434"
 EMBED_MODEL = "bge-m3:latest"          # 1024-dim embeddings
-LLM_MODEL   = "qwen3:14b"     # answer generation
+LLM_MODEL   = "llama3.1:8b"   # answer generation
+LLM_NUM_CTX = 6144                     # context window — must fit prompt + TOP_K chunks or Ollama silently truncates
+                                        # (real contexts run ~5-6K tokens; trimmed from 8192 to free iGPU KV-cache memory)
 
 # Eval — override to a different model so faithfulness grading isn't the
 # generator grading its own homework. Defaults to LLM_MODEL if unset.
@@ -42,9 +44,11 @@ ENABLE_QUERY_EXPANSION = True
 ENABLE_RERANK = True
 RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"   # light ONNX cross-encoder
 # Cross-encoder logit floor. MiniLM logits are frequently negative even for
-# plausible matches, so 0.0 would silently drop real hits — None keeps all top-K
-# regardless of sign; set a real float only if you want to filter weak matches.
-RERANK_SCORE_THRESHOLD = None
+# plausible matches (observed real hits as low as ~1.4), so 0.0 would silently
+# drop them — -6.0 only filters candidates far below any observed real match
+# (e.g. an off-topic query scored -7.6), cutting context noise without risking
+# true positives.
+RERANK_SCORE_THRESHOLD = -6.0
 
 # Hybrid search (dense + sparse BM25) — REQUIRES re-ingest (--reset)
 ENABLE_HYBRID = True

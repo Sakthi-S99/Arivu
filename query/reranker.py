@@ -24,11 +24,13 @@ def _get_encoder():
     return _encoder
 
 
-def rerank(query: str, hits, top_k: int):
+def rerank(query: str, hits, top_k: int | None = None):
     """
-    Re-score `hits` (Qdrant points) against `query`, return top_k.
-    Returns list of (point, rerank_score) tuples — ScoredPoint is immutable,
-    so scores are carried alongside rather than set on the object.
+    Re-score `hits` (Qdrant points) against `query`.
+    Returns list of (point, rerank_score) tuples, full-ranked and sorted —
+    ScoredPoint is immutable, so scores are carried alongside rather than
+    set on the object. Pass top_k to slice to the top N; omit to get every
+    candidate ranked (useful for debugging where a chunk landed).
     """
     if not hits:
         return []
@@ -38,4 +40,4 @@ def rerank(query: str, hits, top_k: int):
     scores = list(encoder.rerank(query, docs))   # one score per doc
 
     ranked = sorted(zip(hits, scores), key=lambda pair: pair[1], reverse=True)
-    return ranked[:top_k]
+    return ranked[:top_k] if top_k is not None else ranked
