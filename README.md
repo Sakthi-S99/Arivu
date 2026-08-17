@@ -15,7 +15,7 @@ Local, privacy-first RAG pipeline. Ollama + Qdrant + BGE-M3. No cloud, no data l
 | Qdrant/bm25 (fastembed) | Sparse lexical embeddings for hybrid search |
 | Qdrant | Vector store (on-disk, hybrid dense + sparse) |
 | ms-marco-MiniLM-L-6-v2 (fastembed) | Cross-encoder reranker |
-| Qwen3 | Answer generation |
+| Llama 3.1 8B | Answer generation |
 
 ---
 
@@ -23,8 +23,8 @@ Local, privacy-first RAG pipeline. Ollama + Qdrant + BGE-M3. No cloud, no data l
 
 ```
 question --> [acronym expansion] --> embed (BGE-M3)
-          --> hybrid search (dense + BM25, RRF fusion, top 20)
-          --> [cross-encoder rerank --> top 5]
+          --> hybrid search (dense + BM25, RRF fusion, top 40)
+          --> [cross-encoder rerank --> top 6]
           --> grounded LLM answer + cited sources
 ```
 
@@ -108,15 +108,16 @@ Edit `config/settings.py`:
 | Setting | Default | Notes |
 |---|---|---|
 | `EMBED_MODEL` | bge-m3:latest | 1024-dim; must match at ingest + query |
-| `LLM_MODEL` | qwen3:14b | Answer generation |
+| `LLM_MODEL` | llama3.1:8b | Answer generation |
+| `LLM_NUM_CTX` | 6144 | Context window — must cover the prompt + `TOP_K` chunks or Ollama silently truncates. A guard in `ask_llm()` logs a warning if a prompt gets close to this limit |
 | `EVAL_JUDGE_MODEL` | = `LLM_MODEL` | Override to a different model for independent faithfulness grading |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 700 / 100 | Words per chunk / overlap between chunks |
-| `RETRIEVE_N` | 20 | Candidates fetched before reranking |
-| `TOP_K` | 5 | Final chunks kept after rerank |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 450 / 70 | Words per chunk / overlap between chunks — smaller chunks reduce the odds one chunk spans multiple unrelated subsections |
+| `RETRIEVE_N` | 40 | Candidates fetched before reranking |
+| `TOP_K` | 6 | Final chunks kept after rerank — tuned against `LLM_NUM_CTX`; raising it risks silent truncation, watch the log warning |
 | `ENABLE_HYBRID` | True | Dense + BM25 sparse search with RRF fusion — needs `--reset` to change |
 | `ENABLE_RERANK` | True | Cross-encoder rerank of the retrieved pool |
 | `ENABLE_QUERY_EXPANSION` | True | Acronym expansion — no re-ingest needed |
-| `RERANK_SCORE_THRESHOLD` | None | Cross-encoder logit floor; `None` keeps all top-K regardless of sign |
+| `RERANK_SCORE_THRESHOLD` | -6.0 | Cross-encoder logit floor, applied after slicing to `TOP_K` (prunes weak survivors, doesn't widen recall); MiniLM logits run negative even for good matches, so this only cuts candidates far below any observed real match |
 | `SCORE_THRESHOLD` | 0.4 | Cosine floor, only used when `ENABLE_RERANK` is off |
 
 Advanced knobs (adaptive embed batch sizing, hard chunk-size ceilings, timeouts) live further down in the same file with inline comments.
@@ -130,7 +131,9 @@ Domain-specific query-expansion acronyms go in `config/acronyms.local.json` (git
 - **Resume-safe** — checkpoints per file (`.ingest_state.json`); crash resumes cleanly
 - **Idempotent** — deterministic chunk IDs; re-ingest overwrites, no duplicates
 - **Change-aware** — tracks a content hash per file, so editing a file in place (without renaming) triggers a clean re-embed; old chunks for that source are cleared before the new ones are inserted
-- **GPU pre-flight check** — `arivu-ingest` checks whether Ollama reports a GPU backend and warns loudly if it's silently running CPU-only, since embedding dominates ingestion time by orders of magnitude over parsing/chunking/upserting
+- **Noise-stripped** — table-of-contents dot-leader lines and repeating page header/footer boilerplate are filtered out before chunking, so they don't pollute chunk embeddings across the corpus
+- **GPU pre-flight check** — `arivu-ingest` checks whether Ollama reports a GPU backend and warns loudly if it's silently running CPU-only, since embedding dominates ingestion time by orders of magnitude over parsing/chunking/upserting. On an Intel iGPU, both `OLLAMA_VULKAN=1` *and* (on newer Ollama builds) `OLLAMA_IGPU_ENABLE=1` need to be set in the `ollama` systemd unit, or Ollama silently drops to CPU-only
+- **Fails loudly, not silently** — a Qdrant connection failure at startup is caught and logged with an actionable message instead of crashing with an unlogged traceback; a Qdrant outage previously looked like `ingest.log` had just stopped mid-run
 - **On-disk vectors** — low RAM footprint on 16GB
 - **Logged** — console + `ingest.log`; failed files skip, don't halt the run
 
@@ -140,7 +143,7 @@ Domain-specific query-expansion acronyms go in `config/acronyms.local.json` (git
 
 ## Requirements
 
-- Ollama with your embed model (`bge-m3`) and LLM (`qwen3:14b`, or whatever you set `LLM_MODEL` to) pulled
+- Ollama with your embed model (`bge-m3`) and LLM (`llama3.1:8b`, or whatever you set `LLM_MODEL` to) pulled
 - Docker (Qdrant)
 - Python 3.10+
 - First run downloads and caches the fastembed ONNX weights (BM25 sparse model + cross-encoder reranker) — no Ollama pull needed for those
