@@ -155,12 +155,39 @@ def _pack_to_char_ceiling(words: list[str]) -> list[str]:
 # anchoring on, unlike guessed heading heuristics.
 _CHAPTER_BOUNDARY = re.compile(r"^\s*chapter\s+\d+\b", re.IGNORECASE)
 
+# PDF furniture that carries no information but gets embedded into chunk
+# text corpus-wide if left in: table-of-contents dot-leader entries, and the
+# running page header/footer (title + page number, and the product-branding
+# line) repeated on every single page. None of these match real prose: dot
+# leaders never occur in body text, and both header variants require a short
+# line with no sentence punctuation, which prose lines wrapped mid-sentence
+# don't have.
+_TOC_DOTS = re.compile(r"\.{4,}")
+_FOOTER_BRAND = re.compile(r"^guidewire\b.*(guide|\d+\.\d+(\.\d+)?)$", re.IGNORECASE)
+_RUNNING_HEADER = re.compile(
+    r"^(\d{1,4}\s+[A-Za-z][\w ,'/-]{1,60}|[A-Za-z][\w ,'/-]{1,60}\s+\d{1,4})$"
+)
+
+
+def _is_noise_line(line: str) -> bool:
+    if _CHAPTER_BOUNDARY.match(line):
+        return False  # chunk_text() needs this line intact to detect the boundary
+    if _TOC_DOTS.search(line):
+        return True
+    if _FOOTER_BRAND.match(line):
+        return True
+    if len(line.split()) <= 6 and _RUNNING_HEADER.match(line):
+        return True
+    return False
+
 
 def _lines(text: str) -> list[str]:
-    """Non-empty lines, with any oversized 'word' pre-split within each line."""
+    """Non-empty lines, with PDF furniture stripped and any oversized 'word' pre-split within each line."""
     out = []
     for line in text.split("\n"):
         line = line.strip()
+        if _is_noise_line(line):
+            continue
         words = _split_long_words(line.split())
         if words:
             out.append(" ".join(words))

@@ -215,6 +215,19 @@ Question: {question}
 
 Answer:"""
 
+    # Rough chars/4 token estimate — cheap enough to always run. Ollama
+    # truncates a prompt that overflows num_ctx silently (no error, just
+    # dropped context), which has bitten this project before when TOP_K or
+    # chunk size moved without rechecking LLM_NUM_CTX still covers it.
+    prompt_tokens_est = len(prompt) // 4
+    budget = LLM_NUM_CTX - 500  # reserve room for num_predict generation
+    if prompt_tokens_est > budget:
+        log.warning(
+            "GENERATE — prompt ~%d tokens exceeds safe budget (~%d of LLM_NUM_CTX=%d minus "
+            "generation reserve) — Ollama may silently truncate context. Consider lowering "
+            "TOP_K or CHUNK_SIZE.", prompt_tokens_est, budget, LLM_NUM_CTX,
+        )
+
     log.info("GENERATE → %s composing answer from %d chars context", LLM_MODEL, len(context))
     t0 = time.time()
     resp = requests.post(

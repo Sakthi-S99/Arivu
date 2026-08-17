@@ -19,8 +19,8 @@ VECTOR_SIZE = 1024                      # BGE-M3 output dimension
 DISTANCE    = "Cosine"
 
 # Chunking (fixed-size with overlap)
-CHUNK_SIZE    = 700                     # target tokens per chunk
-CHUNK_OVERLAP = 100                     # token overlap between chunks
+CHUNK_SIZE    = 450                     # target tokens per chunk — smaller reduces odds a chunk spans multiple subsections
+CHUNK_OVERLAP = 70                      # token overlap between chunks (~proportional to CHUNK_SIZE)
 MAX_CHUNK_CHARS = 4000                  # hard char ceiling — keeps chunk under BGE-M3 token limit
 MAX_WORD_CHARS  = 1000                  # split monster tokens from no-space/table extraction
 
@@ -33,8 +33,8 @@ LARGE_FILE_CHUNKS = 800                 # >= this many chunks → large-file bat
 EMBED_TIMEOUT = 600                     # seconds per embed request
 
 # Retrieval (two-stage: retrieve wide, rerank narrow)
-RETRIEVE_N = 20                        # candidates fetched before reranking
-TOP_K = 5                              # final chunks kept after rerank
+RETRIEVE_N = 40                        # candidates fetched before reranking
+TOP_K = 6                              # final chunks kept after rerank — 8 pushed prompts to ~6079 tokens, over LLM_NUM_CTX=6144's safe budget and causing real truncation
 SCORE_THRESHOLD = 0.4                  # cosine floor (dense-only mode)
 
 # Query expansion (acronym/synonym) — no re-ingest needed
