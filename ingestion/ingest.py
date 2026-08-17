@@ -354,6 +354,26 @@ def delete_source_points(client: QdrantClient, rel_source: str):
     )
 
 
+# ── Qdrant connection ─────────────────────────────────────────────────────────
+def _connect() -> QdrantClient:
+    """
+    Connect to Qdrant, failing fast with an actionable, logged error instead
+    of an unhandled traceback that never reaches ingest.log (reproduced
+    2026-08-17: the qdrant container was stopped and the run appeared to just
+    hang, since the connection error only went to stderr).
+    """
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    try:
+        client.get_collections()
+    except Exception as e:
+        log.error(
+            "Cannot reach Qdrant at %s:%s (%s). Is the container running? "
+            "Try: docker start qdrant", QDRANT_HOST, QDRANT_PORT, e,
+        )
+        sys.exit(1)
+    return client
+
+
 # ── Orphan cleanup ────────────────────────────────────────────────────────────
 def clean_orphans():
     """
@@ -362,7 +382,7 @@ def clean_orphans():
     """
     _acquire_lock()
     docs_root = os.path.expanduser(DOCS_DIR)
-    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    client = _connect()
 
     if not client.collection_exists(COLLECTION):
         log.warning("Collection does not exist — nothing to clean.")
@@ -410,7 +430,7 @@ def clean_orphans():
 
 # ── Qdrant setup ──────────────────────────────────────────────────────────────
 def get_client(reset: bool = False) -> QdrantClient:
-    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    client = _connect()
     exists = client.collection_exists(COLLECTION)
 
     if reset and exists:

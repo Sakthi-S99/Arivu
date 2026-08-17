@@ -17,14 +17,14 @@ import json
 import argparse
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config.settings import LLM_MODEL, EVAL_JUDGE_MODEL, SCORE_THRESHOLD, OLLAMA_HOST
+from config.settings import LLM_MODEL, EVAL_JUDGE_MODEL, OLLAMA_HOST
 from qdrant_client import QdrantClient
 from config.settings import QDRANT_HOST, QDRANT_PORT
 
 import requests
 from query.ask import retrieve, build_context, ask_llm
 
-REFUSAL_MARKER = "do not contain this information"
+REFUSAL_MARKER = "do not contain"
 QUESTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "questions.json")
 
 
@@ -68,9 +68,9 @@ def eval_positive(item: dict, client, verbose: bool) -> dict:
 
     # 1. Retrieval — any strong chunk?
     if not hits:
-        result["reasons"].append(f"no chunks above score {SCORE_THRESHOLD}")
+        result["reasons"].append("no chunks retrieved after search/rerank filtering")
         return result
-    top_score = max(h.score for h in hits)
+    top_score = max(score for _point, score, _label in hits)
     result["top_score"] = round(top_score, 3)
 
     # 2. Generate answer
